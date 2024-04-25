@@ -55,76 +55,98 @@ def run(n_limit: Optional[int] = None):
     # LLaMa 2 70B single-node weight shapes
     # assumes fused attn.wqkv and ffn.w13
     # source: https://fburl.com/gsheet/g8onr7rh
-    name_to_shapes_70b = {
-        "attn.wqkv": (8192, 1280),
-        "attn.w0": (1024, 8192),
-        "ffn.w13": (8192, 7168),
-        "ffn.w2": (3584, 8192),
-    }
+    ## TP=8
+    #name_to_shapes_70b = {
+    #    "attn.wqkv": (8192, 1280),
+    #    "attn.w0": (1024, 8192),
+    #    "ffn.w13": (8192, 7168),
+    #    "ffn.w2": (3584, 8192),
+    #}
 
+    # TP=4
+    name_to_shapes_70b = {
+        "attn.wqkv": (8192, 2560),
+        "attn.w0": (2560, 8192),
+        "ffn.w13": (8192, 14336),
+        "ffn.w2": (7168, 8192),
+    }
     headers = ("name", "shape", "dtype", "ref_time_s", "fp8_time_s", "fp8_speedup")
     results = []
 
     name_to_shapes = name_to_shapes_70b
     dtypes = torch.bfloat16, torch.float16
 
-    for idx, (dtype, (name, (K, N))) in enumerate(
-        itertools.product(dtypes, name_to_shapes.items())
-    ):
-        if n_limit is not None and idx >= n_limit:
-            break
+    # Test auto-regression batch sizes and seq len
+    configs = [
+        [8, 1],
+        [16, 1],
+        [32, 1],
+        [64, 1],
+        [128, 1],
+        [512, 1],
+        [1024, 1],
+        [2048, 1],
+    ]
 
-        # source: Xiao Sun, these are realistic for LLaMa 70B training
-        bsz, seq_len = 4, 4096
+    for bsz, seq_len in configs:
+        for idx, (dtype, (name, (K, N))) in enumerate(
+            itertools.product(dtypes, name_to_shapes.items())
+        ):
+            if n_limit is not None and idx >= n_limit:
+                break
 
-        M = bsz * seq_len
-        print("M, K, N:", M, K, N)
-        tops = 2 * M * N * K
-        print(f"tops: {tops:.2E}")
+            # # source: Xiao Sun, these are realistic for LLaMa 70B training
+            # bsz, seq_len = 4, 4096
 
-        # raw torch.mm
-        A = torch.randn(M, K, device=device, dtype=dtype)
-        m_ref = nn.Sequential(nn.Linear(K, N, dtype=dtype, device=device, bias=False))
-        ref_time_sec, ref_tops_sec, ref_pct_top_peak = do_benchmarks(
-            tops, dtype_to_peak_tops[dtype], m_ref, A
-        )
-        print(
-            f"{dtype} time_sec {ref_time_sec:.2E}, tops/sec {ref_tops_sec:.2E}, pct_peak {ref_pct_top_peak:.3f}"
-        )
+            M = bsz * seq_len
+            print("M, K, N:", M, K, N)
+            tops = 2 * M * N * K
+            print(f"tops: {tops:.2E}")
 
-        del A
+            # raw torch.mm
+            A = torch.randn(M, K, device=device, dtype=dtype)
+            m_ref = nn.Sequential(nn.Linear(K, N, dtype=dtype, device=device, bias=False))
+            ref_time_sec, ref_tops_sec, ref_pct_top_peak = do_benchmarks(
+                tops, dtype_to_peak_tops[dtype], m_ref, A
+            )
+            print(
+                f"{dtype} time_sec {ref_time_sec:.2E}, tops/sec {ref_tops_sec:.2E}, pct_peak {ref_pct_top_peak:.3f}"
+            )
 
-        # raw float8 matmul (upper bound for what we can achive in eager mode)
-        # TODO(future): add e5m2
-        d1, d2, d3 = torch.float8_e4m3fn, torch.float8_e4m3fn, dtype
-        A = torch.zeros(M, K, device=device, dtype=d1)
-        B = torch.zeros(K, N, device=device, dtype=d2).t().contiguous().t()
+            del A
 
-        def do_matmul(A, B):
-            return torch._scaled_mm(A, B, out_dtype=d3, use_fast_accum=False)
+            # raw float8 matmul (upper bound for what we can achive in eager mode)
+            # TODO(future): add e5m2
+            d1, d2, d3 = torch.float8_e4m3fn, torch.float8_e4m3fn, dtype
+            A = torch.zeros(M, K, device=device, dtype=d1)
+            B = torch.zeros(K, N, device=device, dtype=d2).t().contiguous().t()
 
-        fp8_time_sec, fp8_tops_sec, fp8_pct_top_peak = do_benchmarks(
-            tops, dtype_to_peak_tops[d1], do_matmul, A, B
-        )
-        print(
-            f"fp8 time_sec {fp8_time_sec:.2E}, tops/sec {fp8_tops_sec:.2E}, pct_peak {fp8_pct_top_peak:.3f}"
-        )
+            def do_matmul(A, B):
+                return torch._scaled_mm(A, B, out_dtype=d3, use_fast_accum=False)
 
-        del A, B
+            fp8_time_sec, fp8_tops_sec, fp8_pct_top_peak = do_benchmarks(
+                tops, dtype_to_peak_tops[d1], do_matmul, A, B
+            )
+            print(
+                f"fp8 time_sec {fp8_time_sec:.2E}, tops/sec {fp8_tops_sec:.2E}, pct_peak {fp8_pct_top_peak:.3f}"
+            )
 
-        results.append(
-            [
-                name,
-                (M, K, N),
-                dtype,
-                ref_time_sec,
-                fp8_time_sec,
-                ref_time_sec / fp8_time_sec,
-            ]
-        )
+            del A, B
+
+            results.append(
+                [
+                    name,
+                    (M, K, N),
+                    dtype,
+                    ref_time_sec,
+                    fp8_time_sec,
+                    ref_time_sec / fp8_time_sec,
+                ]
+            )
 
     data_pd = pd.DataFrame(results, columns=headers)
-    print(data_pd)
+    with pd.option_context("display.max_rows",100):
+        print(data_pd)
 
 
 def main() -> None:
