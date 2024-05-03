@@ -28,6 +28,12 @@ from float8_experimental.float8_tensor import (
 
 from float8_experimental.float8_utils import amax_history_to_scale, tensor_to_amax
 
+HAS_TRITON_FP8_MATMUL = False
+try:
+    from float8_experimental.splitk_gemm_fp8 import gemm_split_k as triton_matmul
+    HAS_TRITON_FP8_MATMUL = True
+except:
+    pass
 
 def _maybe_initialize_amaxes_scales_for_float8_cast(
     x,
@@ -391,12 +397,13 @@ class Float8DASWLinear(Float8LinearMixin, torch.nn.Linear):
 
 # Credit to Mauricio Serrano @ IBM
 class Float8SWLinear(torch.nn.Linear):
-    def __init__(self, in_features, out_features, bias=True):
-        super(Float8SWLinear, self).__init__(in_features=out_features, out_features=in_features, bias=bias)
+    def __init__(self, in_features, out_features, bias=True, use_triton=False):
+        super(Float8SWLinear, self).__init__(in_features=in_features, out_features=out_features, bias=bias)
         self.w_f8 = None
         self.w_inv_s = None
         self.biasfp16 = None
         self.finfo = torch.finfo(torch.float8_e4m3fn)
+        self.use_triton = use_triton
 
     @classmethod
     def from_float(cls, mod, emulate: bool = False):
@@ -416,6 +423,7 @@ class Float8SWLinear(torch.nn.Linear):
         new_mod.emulate = emulate
         # I think its okay to send all params and buffers to device
         new_mod.to(mod.weight.device)
+        # mod.weight.shape = out_features x in_features
         w_f8, w_inv_s = new_mod.to_float8(mod.weight)
         new_mod.w_f8 = w_f8.t()
         new_mod.w_inv_s = w_inv_s
@@ -429,28 +437,31 @@ class Float8SWLinear(torch.nn.Linear):
         return new_mod
 
     def to_float8(self, x):
-      dtype = torch.float8_e4m3fn
-      #finfo = torch.finfo(torch.float8_e4m3fn)
-      # Calculate the scale as dtype max divided by absmax
-      scale = self.finfo.max / x.abs().max().clamp(min=1e-12)
-      # scale and clamp the tensor to bring it to
-      # the representative range of float8 data type
-      # (as default cast is unsaturated)
-      x_scl_sat = (x * scale).clamp(min=self.finfo.min, max=self.finfo.max)
-      # Return both float8 data and the inverse scale (as float),
-      # as both required as inputs to torch._scaled_mm
-      return x_scl_sat.to(dtype), scale.float().reciprocal()
-
+        dtype = torch.float8_e4m3fn
+        #finfo = torch.finfo(torch.float8_e4m3fn)
+        # Calculate the scale as dtype max divided by absmax
+        scale = self.finfo.max / x.abs().max().clamp(min=1e-12)
+        # scale and clamp the tensor to bring it to
+        # the representative range of float8 data type
+        # (as default cast is unsaturated)
+        x_scl_sat = (x * scale).clamp(min=self.finfo.min, max=self.finfo.max)
+        # Return both float8 data and the inverse scale (as float),
+        # as both required as inputs to torch._scaled_mm
+        return x_scl_sat.to(dtype), scale.float().reciprocal()
 
     def forward(self, x):
-      # create test inputs
-      #x_f8, x_inv_s = self.to_float8(x.to(torch.float16))
-      x_f8 = x.to(torch.float8_e4m3fn)
-      # perform the float8 matmul
-      ishape= list(x_f8.shape)
-      x_f8_mat = x_f8.view(-1,ishape[-1])
-      #FIXME: out_type should be the same as the original weight type?
-      y, _ = torch._scaled_mm(x_f8_mat, self.w_f8, out_dtype=torch.float16,
-                             scale_b=self.w_inv_s, bias=self.biasfp16, use_fast_accum=False)#, scale_a=x_inv_s)
-      y = y.view(ishape[0],ishape[1],-1)
-      return y
+        # create test inputs
+        #x_f8, x_inv_s = self.to_float8(x.to(torch.float16))
+        x_f8 = x.to(torch.float8_e4m3fn)
+        # perform the float8 matmul
+        ishape= list(x_f8.shape)
+        x_f8_mat = x_f8.view(-1,ishape[-1])
+        if self.use_triton and HAS_TRITON_FP8_MATMUL:
+            y = triton_matmul(x_f8_mat, self.w_f8, scale_b=self.w_inv_s.item())
+            # y = triton_matmul(x_f8_mat, self.w_f8) * self.w_inv_s
+        else:
+            #FIXME: out_type should be the same as the original weight type?
+            y, _ = torch._scaled_mm(x_f8_mat, self.w_f8, out_dtype=torch.float16,
+                                    scale_b=self.w_inv_s, bias=self.biasfp16, use_fast_accum=False)#, scale_a=x_inv_s)
+        y = y.view(ishape[0],ishape[1],-1)
+        return y
