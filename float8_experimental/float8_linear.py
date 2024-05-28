@@ -356,17 +356,11 @@ class Float8DASWLinear(Float8LinearMixin, torch.nn.Linear):
         self.float8_pre_forward(x)
 
         x_fp8 = self.cast_x_to_float8(x, self.is_amax_initialized)
-
-        # convert weight tensor to fp8 ahead of use
-        if not hasattr(self, 'w_fp8_t'):
-            self.w_fp8_t = self.cast_w_to_float8(self.weight, self.is_amax_initialized).t()
-            # Release fp16 memory
-            del self.weight
         
-        y = torch.matmul(x_fp8, self.w_fp8_t) # matmul expects both inputs to be Float8Tensor 
+        y = torch.matmul(x_fp8, self.weight.t()) # matmul expects both inputs to be Float8Tensor 
 
-        # Cast gradY to float8_e5m2 during backward
-        y = self.cast_y_to_float8_in_bw(y, self.emulate) # Never backward for our use case
+        # # Cast gradY to float8_e5m2 during backward
+        # y = self.cast_y_to_float8_in_bw(y, self.emulate) # Never backward for our use case
 
         if self.bias is not None:
             y = y + self.bias.to(y.dtype)
@@ -392,6 +386,9 @@ class Float8DASWLinear(Float8LinearMixin, torch.nn.Linear):
         new_mod.emulate = emulate
         # I think its okay to send all params and buffers to device
         new_mod.to(mod.weight.device)
+        
+        # convert weight tensor to fp8 after moving to device to avoid to_fp8 error (tensors not on the same device)
+        new_mod.weight = torch.nn.Parameter(new_mod.cast_w_to_float8(mod.weight, False), requires_grad=False)
         return new_mod
 
 
@@ -454,11 +451,7 @@ class Float8SWLinear(torch.nn.Linear):
         return x_scl_sat.to(dtype), scale.float().reciprocal()
 
     def forward(self, x):
-        # create test inputs
-        #x_f8, x_inv_s = self.to_float8(x.to(torch.float16))
-        # print(f"{x.shape=}")
         x_f8 = x.to(torch.float8_e4m3fn)
-        # perform the float8 matmul
         ishape= list(x_f8.shape)
         
         if ishape[0] == 0: # special case handling for mixtral
@@ -468,16 +461,8 @@ class Float8SWLinear(torch.nn.Linear):
             x_f8 = x_f8.view(-1,ishape[-1])
         
         if self.use_triton and HAS_TRITON_FP8_MATMUL:
-            # y = triton_matmul(x_f8_mat, self.w_f8, scale_b=self.w_inv_s.item())
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s
         else:
-            #FIXME: out_type should be the same as the original weight type?
-            # print(f"{x_f8.shape=}")
-            # print(f"{x_f8.stride()=}")
-            # print(f"{x_f8.dtype=}")
-            # print(f"{self.weight.T.shape=}")
-            # print(f"{self.weight.T.stride()=}")
-            # print(f"{self.weight.T.dtype=}")
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16,
                                     scale_b=self.w_inv_s, bias=self.biasfp16, use_fast_accum=False)#, scale_a=x_inv_s)
         if len(ishape) == 3:            
