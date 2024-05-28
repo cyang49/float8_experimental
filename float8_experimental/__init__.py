@@ -7,4 +7,4 @@
 from float8_experimental.float8_linear import Float8Linear, Float8DASWLinear, Float8SWLinear
 from float8_experimental.float8_tensor import Float8Tensor
 
-__all__ = ["Float8Tensor", "Float8Linear", "Float8DASWLinear", "Float8SWLinear"]
+__all__ = ["Float8Tensor", "Float8Linear", "Float8DASWLinear", "Float8SWLinear", "Float8DASWLinear2"]
