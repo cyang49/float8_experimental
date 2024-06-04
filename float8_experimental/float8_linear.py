@@ -35,6 +35,15 @@ try:
 except:
     pass
 
+HAS_VLLM_CUTLASS_SCALED_MM = False
+try:
+    from vllm._custom_ops import cutlass_scaled_mm_dq
+    HAS_VLLM_CUTLASS_SCALED_MM = True
+except:
+    pass
+USE_VLLM_CUTLASS_SCALED_MM = HAS_VLLM_CUTLASS_SCALED_MM
+
+
 def _maybe_initialize_amaxes_scales_for_float8_cast(
     x,
     cur_amax,
@@ -410,7 +419,10 @@ class Float8SWLinear(torch.nn.Linear):
         new_mod.emulate = emulate
         w_f8, w_inv_s = new_mod.to_float8(mod.weight)
         new_mod.weight = torch.nn.Parameter(w_f8, requires_grad=False)
-        new_mod.w_inv_s = torch.nn.Parameter(w_inv_s, requires_grad=False)
+        if USE_VLLM_CUTLASS_SCALED_MM:
+            new_mod.w_inv_s = w_inv_s.to('cpu') # cutlass_scaled_mm requires scale tensor on cpu for now
+        else:
+            new_mod.w_inv_s = torch.nn.Parameter(w_inv_s, requires_grad=False)
         if mod.bias is not None:
         #    new_mod.biasfp16 = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False)
             new_mod.bias = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False)
@@ -445,6 +457,10 @@ class Float8SWLinear(torch.nn.Linear):
         if self.use_triton and HAS_TRITON_FP8_MATMUL:
             assert self.bias is None, "triton path doesn't support bias yet"
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s
+        elif USE_VLLM_CUTLASS_SCALED_MM and self.bias is None:
+            y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
+                                     a_scales=torch.tensor([1.0], dtype=torch.float32, device='cpu'), # not optional
+                                     b_scales=self.w_inv_s) 
         else:
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16,
                                     scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
@@ -471,51 +487,18 @@ class Float8DASWLinear2(Float8SWLinear):
         if len(ishape) == 3:
             x_f8 = x_f8.view(-1,ishape[-1])
         
-        assert self.use_triton==False, "Float8DASWLinear2 doesn't support Triton kernel yet"
-        y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16, scale_a=x_inv_s,
-                                scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
+        
+        if self.use_triton and HAS_TRITON_FP8_MATMUL:
+            assert self.bias is None, "triton path doesn't support bias yet"
+            y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s * x_inv_s
+        elif USE_VLLM_CUTLASS_SCALED_MM and self.bias is None:
+            y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
+                                     a_scales=x_inv_s.to('cpu'), # not optional
+                                     b_scales=self.w_inv_s) 
+        else: # use torch scaled_mm
+            y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16, scale_a=x_inv_s,
+                                    scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
         if len(ishape) == 3:            
             y = y.view(ishape[0],ishape[1],-1)
         
         return y
-
-    # def to_float8(self, x):
-    #     dtype = torch.float8_e4m3fn
-    #     finfo = torch.finfo(dtype)
-    #     # Calculate the scale as dtype max divided by absmax
-    #     scale = finfo.max / x.abs().max().clamp(min=1e-12)
-    #     # scale and clamp the tensor to bring it to
-    #     # the representative range of float8 data type
-    #     # (as default cast is unsaturated)
-    #     x_scl_sat = (x * scale).clamp(min=finfo.min, max=finfo.max)
-    #     # Return both float8 data and the inverse scale (as float),
-    #     # as both required as inputs to torch._scaled_mm
-    #     return x_scl_sat.to(dtype), scale.float().reciprocal()
-
-    # # same code as Mauricio's SWLinear.from_float
-    # @classmethod
-    # def from_float(cls, mod, emulate: bool = False):
-    #     """
-    #     Create an nn.Linear with fp8 compute from a regular nn.Linear
-
-    #     Args:
-    #         mod (torch.nn.Linear): nn.Linear to convert
-    #         emulate (bool): whether to emulate fp8 matmul logic in float32
-    #     """
-    #    # TODO Follow up! This is a great idea but we need the mixin base to create real
-    #     # Tensors and the Linear base to create empty params
-    #     # with torch.device("meta"):
-    #     new_mod = cls(mod.in_features, mod.out_features, bias=False)
-    #     new_mod.emulate = emulate
-        
-    #     w_f8, w_inv_s = new_mod.to_float8(mod.weight)
-    #     new_mod.weight = torch.nn.Parameter(w_f8, requires_grad=False)
-    #     new_mod.w_inv_s = torch.nn.Parameter(w_inv_s, requires_grad=False)
-        
-    #     new_mod.to(mod.weight.device) 
-    #     assert mod.bias is None # no bias support for now
-    #     # if mod.bias is not None:
-    #     #    new_mod.biasfp16 = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False)
-    #     mod.weight = None
-    #     mod.bias = None
-    #     return new_mod
