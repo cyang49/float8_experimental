@@ -459,8 +459,8 @@ class Float8SWLinear(torch.nn.Linear):
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s
         elif USE_VLLM_CUTLASS_SCALED_MM:
             y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
-                                     a_scales=torch.tensor([1.0], dtype=torch.float32), # not optional
-                                     b_scales=self.w_inv_s, bias=self.bias)
+                                     scale_a=torch.tensor([1.0], dtype=torch.float32), # not optional
+                                     scale_b=self.w_inv_s, bias=self.bias)
         else:
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16,
                                     scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
@@ -493,8 +493,8 @@ class Float8DASWLinear2(Float8SWLinear):
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s * x_inv_s
         elif USE_VLLM_CUTLASS_SCALED_MM:
             y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
-                                     a_scales=x_inv_s, # not optional
-                                     b_scales=self.w_inv_s, bias=self.bias)
+                                     scale_a=x_inv_s, # not optional
+                                     scale_b=self.w_inv_s, bias=self.bias)
         else: # use torch scaled_mm
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16, scale_a=x_inv_s,
                                     scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
