@@ -42,6 +42,7 @@ try:
 except:
     pass
 USE_VLLM_CUTLASS_SCALED_MM = HAS_VLLM_CUTLASS_SCALED_MM
+# USE_VLLM_CUTLASS_SCALED_MM = False
 
 
 def _maybe_initialize_amaxes_scales_for_float8_cast(
@@ -419,13 +420,12 @@ class Float8SWLinear(torch.nn.Linear):
         new_mod.emulate = emulate
         w_f8, w_inv_s = new_mod.to_float8(mod.weight)
         new_mod.weight = torch.nn.Parameter(w_f8, requires_grad=False)
-        if USE_VLLM_CUTLASS_SCALED_MM:
-            new_mod.w_inv_s = w_inv_s.to('cpu') # cutlass_scaled_mm requires scale tensor on cpu for now
-        else:
-            new_mod.w_inv_s = torch.nn.Parameter(w_inv_s, requires_grad=False)
+        new_mod.w_inv_s = torch.nn.Parameter(w_inv_s, requires_grad=False)
         if mod.bias is not None:
         #    new_mod.biasfp16 = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False)
-            new_mod.bias = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False)
+            new_mod.bias = torch.nn.Parameter(mod.bias.to(torch.float16), requires_grad=False) # force bias to be fp16 for now
+        else:
+            new_mod.bias = None
         new_mod.to(mod.weight.device)
 
         # mod.weight = None
@@ -457,10 +457,10 @@ class Float8SWLinear(torch.nn.Linear):
         if self.use_triton and HAS_TRITON_FP8_MATMUL:
             assert self.bias is None, "triton path doesn't support bias yet"
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s
-        elif USE_VLLM_CUTLASS_SCALED_MM and self.bias is None:
+        elif USE_VLLM_CUTLASS_SCALED_MM:
             y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
-                                     a_scales=torch.tensor([1.0], dtype=torch.float32, device='cpu'), # not optional
-                                     b_scales=self.w_inv_s) 
+                                     a_scales=torch.tensor([1.0], dtype=torch.float32), # not optional
+                                     b_scales=self.w_inv_s, bias=self.bias)
         else:
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16,
                                     scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
@@ -491,10 +491,10 @@ class Float8DASWLinear2(Float8SWLinear):
         if self.use_triton and HAS_TRITON_FP8_MATMUL:
             assert self.bias is None, "triton path doesn't support bias yet"
             y = triton_matmul(x_f8, self.weight.t()) * self.w_inv_s * x_inv_s
-        elif USE_VLLM_CUTLASS_SCALED_MM and self.bias is None:
+        elif USE_VLLM_CUTLASS_SCALED_MM:
             y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
-                                     a_scales=x_inv_s.to('cpu'), # not optional
-                                     b_scales=self.w_inv_s) 
+                                     a_scales=x_inv_s, # not optional
+                                     b_scales=self.w_inv_s, bias=self.bias)
         else: # use torch scaled_mm
             y, _ = torch._scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16, scale_a=x_inv_s,
                                     scale_b=self.w_inv_s, bias=self.bias, use_fast_accum=False)
