@@ -37,12 +37,12 @@ except:
 
 HAS_VLLM_CUTLASS_SCALED_MM = False
 try:
-    from vllm._custom_ops import cutlass_scaled_mm_dq
+    from vllm._custom_ops import cutlass_scaled_mm
     HAS_VLLM_CUTLASS_SCALED_MM = True
 except:
     pass
-# USE_VLLM_CUTLASS_SCALED_MM = HAS_VLLM_CUTLASS_SCALED_MM
-USE_VLLM_CUTLASS_SCALED_MM = False
+USE_VLLM_CUTLASS_SCALED_MM = HAS_VLLM_CUTLASS_SCALED_MM
+# USE_VLLM_CUTLASS_SCALED_MM = False
 
 
 def _maybe_initialize_amaxes_scales_for_float8_cast(
@@ -466,7 +466,7 @@ class Float8SWLinear(torch.nn.Linear):
             if self.bias is not None:
                 y = y + self.bias
         elif USE_VLLM_CUTLASS_SCALED_MM:
-            y = cutlass_scaled_mm_dq(x_f8,
+            y = cutlass_scaled_mm(x_f8,
                                      self.weight.T,
                                      scale_a=self.unit_scale, # not optional
                                      scale_b=self.w_inv_s,
@@ -511,7 +511,7 @@ class Float8DASWLinear2(Float8SWLinear):
             if self.bias is not None:
                 y = y + self.bias
         elif USE_VLLM_CUTLASS_SCALED_MM:
-            y = cutlass_scaled_mm_dq(x_f8, self.weight.T, out_dtype=torch.float16,
+            y = cutlass_scaled_mm(x_f8, self.weight.T, out_dtype=torch.float16,
                                      scale_a=x_inv_s, # not optional
                                      scale_b=self.w_inv_s, bias=self.bias)
         else: # use torch scaled_mm
