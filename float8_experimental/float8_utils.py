@@ -119,7 +119,7 @@ def tensor_to_scale(
     amax = tensor_to_amax(x, reduce_amax=reduce_amax)
     if scale_ub is not None: # activation scale upper bound for llama3-405b
         amax = torch.minimum(amax, scale_ub)
-        print("computing scale of activation conversion to fp8")
+        # print("computing scale of activation conversion to fp8")
     return amax_to_scale(amax, float8_dtype, x.dtype)
 
 
