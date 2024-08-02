@@ -34,7 +34,7 @@ e5m2_dtype = torch.float8_e5m2 if not config.use_fnuz_dtype else torch.float8_e5
 
 @torch.no_grad()
 def amax_to_scale(
-    amax: torch.Tensor, float8_dtype: torch.dtype, orig_dtype: torch.dtype
+    amax: torch.Tensor, float8_dtype: torch.dtype, orig_dtype: torch.dtype,
 ):
     """Converts the amax value of a tensor to the fp8 scale.
     Args:
@@ -114,9 +114,12 @@ def tensor_to_amax(x: torch.Tensor, reduce_amax: bool = False) -> torch.Tensor:
 
 @torch.no_grad()
 def tensor_to_scale(
-    x: torch.Tensor, float8_dtype: torch.dtype, reduce_amax: bool = False
+    x: torch.Tensor, float8_dtype: torch.dtype, reduce_amax: bool = False, scale_ub: torch.Tensor = None,
 ) -> torch.Tensor:
     amax = tensor_to_amax(x, reduce_amax=reduce_amax)
+    if scale_ub is not None: # activation scale upper bound for llama3-405b
+        amax = torch.minimum(amax, scale_ub)
+        print("computing scale of activation conversion to fp8")
     return amax_to_scale(amax, float8_dtype, x.dtype)
 
 

@@ -205,7 +205,7 @@ class _FromFloat8ConstrFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor):
-        return tensor._data.to(tensor._orig_dtype) / tensor._scale
+        return tensor._data.to(tensor._orig_dtype) / tensor._scale.to(tensor._orig_dtype)
 
     @staticmethod
     def backward(ctx, g):

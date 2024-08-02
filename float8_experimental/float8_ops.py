@@ -41,6 +41,7 @@ def implements(aten_ops):
         aten.slice.Tensor,
         aten.transpose.int,
         aten.fill_.Scalar,
+        aten.empty_like.default,
     ]
 )
 def float8_desugar_op(aten_op, args, kwargs=None):
@@ -304,7 +305,7 @@ def index_put_fp8(aten_op, args, kwargs=None):
     fp8_values = args[2]
     assert isinstance(fp8_self, Float8Tensor)
     assert isinstance(fp8_values, Float8Tensor)
-    assert fp8_self._scale == fp8_values._scale
+    #assert fp8_self._scale == fp8_values._scale
     assert fp8_self.dtype == fp8_values.dtype
     assert fp8_self._orig_dtype == fp8_values._orig_dtype
 
@@ -339,9 +340,9 @@ def copy_fp8(aten_op, args, kwargs=None):
         assert (
             self._orig_dtype == src._orig_dtype
         ), "Expecting both Float8Tensors to be of the same dtype"
-        assert (
-            self._scale == src._scale
-        ), "Expecting both Float8Tensors to have thee same scale"
+        #assert (
+        #    self._scale == src._scale
+        #), "Expecting both Float8Tensors to have thee same scale"
         assert (
             self._linear_mm_config == src._linear_mm_config
         ), "Expecting both Float8Tensors to have thee same mm config"

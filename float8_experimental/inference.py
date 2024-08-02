@@ -52,6 +52,7 @@ class QuantConfig:
 
     activation_casting: ActivationCasting
     static_quantization_scale: Optional[torch.Tensor] = None
+    dynamic_activation_scale_ub: Optional[torch.Tensor] = None
 
     # If True, then prior to performing the fp8 scaled mamtmul we will pad the
     # inner dimension of a (dim 1) and b (dim 2) with 0s. This is needed for matmuls
@@ -97,6 +98,13 @@ class Float8InferenceLinear(torch.nn.Linear):
             )
         else:
             self.static_quantization_scale = None
+        
+        if quant_config.dynamic_activation_scale_ub is not None:
+            self.register_buffer(
+                "dynamic_activation_scale_ub", quant_config.dynamic_activation_scale_ub
+            )
+        else:
+            self.dynamic_activation_scale_ub = None
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.activation_casting == ActivationCasting.WEIGHT_ONLY:
@@ -108,6 +116,7 @@ class Float8InferenceLinear(torch.nn.Linear):
             input,
             self.linear_mm_config,
             static_quantization_scale=self.static_quantization_scale,
+            dynamic_activation_scale_ub=self.dynamic_activation_scale_ub,
         )
         return torch.nn.functional.linear(x_fp8, self.weight, self.bias)
 
@@ -178,6 +187,7 @@ def cast_to_float8_e4m3_inference(
     linear_mm_config: LinearMMConfig,
     reduce_amax: bool = False,
     static_quantization_scale: Optional[torch.Tensor] = None,
+    dynamic_activation_scale_ub: Optional[torch.Tensor] = None,
 ) -> Float8Tensor:
     """Casts an input tensor to the Float8 (e4m3fn*)
 
@@ -198,7 +208,7 @@ def cast_to_float8_e4m3_inference(
     scale = (
         static_quantization_scale
         if static_quantization_scale is not None
-        else tensor_to_scale(inpt_tensor, e4m3_dtype, reduce_amax)
+        else tensor_to_scale(inpt_tensor, e4m3_dtype, reduce_amax, dynamic_activation_scale_ub)
     )
     return hp_tensor_and_scale_to_float8(
         inpt_tensor,
